@@ -452,3 +452,184 @@ body {
   color: #444;
   margin: 0;
 }
+
+/* Rating filter (5 stars in topbar) */
+.rating-filter .star {
+  color: #777;
+  cursor: pointer;
+}
+.rating-filter .star.filled {
+  color: #f2b400;
+  opacity: 1;
+}
+.rating-filter .star:hover { transform: scale(1.15); }
+
+/* Google Fonts icon button */
+#googleFontsBtn {
+  background: #3a3a3a;
+  color: #eee;
+  border: 1px solid #4a4a4a;
+  border-radius: 5px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: bold;
+}
+#googleFontsBtn:hover { background: #454545; color: #4285F4; }
+
+/* Detail view size slider */
+#detailSizeLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+}
+
+/* Per-card individual size stepper */
+.size-stepper {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: auto;
+}
+.size-stepper button {
+  background: transparent;
+  border: 1px solid var(--dot-border, #777);
+  color: var(--meta-text, #999);
+  border-radius: 3px;
+  width: 16px;
+  height: 16px;
+  line-height: 1;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.size-stepper button:hover {
+  border-color: #5b8dee;
+  color: #5b8dee;
+}
+
+/* Details tab (font metadata table) */
+.details-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.details-table tr {
+  border-bottom: 1px solid #eee;
+}
+.details-table td {
+  padding: 10px 12px;
+  vertical-align: top;
+}
+.details-table td:first-child {
+  width: 160px;
+  color: #888;
+  font-family: -apple-system, sans-serif;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.details-table td:last-child {
+  color: #1a1a1a;
+  word-break: break-word;
+}
+.details-table a { color: #5b8dee; }
+.details-empty {
+  color: #999;
+  font-size: 13px;
+  padding: 10px 0;
+}
+
+/* Styles tab v2 — family list with its own local text input */
+.styles-tab-input-row {
+  margin-bottom: 24px;
+}
+.styles-tab-input-row input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 15px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  outline: none;
+  color: #1a1a1a;
+}
+.styles-tab-input-row input:focus { border-color: #5b8dee; }
+
+.styles-family-list {
+  display: flex;
+  flex-direction: column;
+}
+.styles-family-row {
+  padding: 16px 0;
+  border-bottom: 1px solid #eee;
+}
+.styles-family-row:last-child { border-bottom: none; }
+.styles-family-row .font-name { color: #888; }
+.styles-family-row .star { color: #ccc; }
+.styles-family-row.clickable-sibling { cursor: pointer; }
+.styles-family-row.clickable-sibling:hover { background: #fafafa; }
+.styles-row-preview {
+  color: #1a1a1a;
+  line-height: 1.3;
+  word-break: break-word;
+  margin-top: 6px;
+}
+
+/* Google Fonts search row (and the shared name-search row above the main list) */
+#googleSearchRow, #nameSearchRow {
+  padding: 14px 20px 0;
+}
+#googleSearchInput, #nameSearchInput {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+  background: #1a1a1a;
+  color: #fff;
+  border: 1px solid #444;
+  border-radius: 6px;
+  outline: none;
+}
+#googleSearchInput:focus, #nameSearchInput:focus { border-color: #5b8dee; }
+#googleSearchRow.bg-light #googleSearchInput,
+#nameSearchRow.bg-light #nameSearchInput {
+  background: #fff;
+  color: #1a1a1a;
+  border-color: #ddd;
+}
+
+/* Family-group count badge */
+.family-count-badge {
+  font-size: 10px;
+  font-family: -apple-system, sans-serif;
+  color: #5b8dee;
+  background: rgba(91, 141, 238, 0.12);
+  border-radius: 8px;
+  padding: 1px 7px;
+  margin-left: 2px;
+  white-space: nowrap;
+}
+
+/* Google Fonts "Load more" pagination button */
+.load-more-btn {
+  display: block;
+  width: 100%;
+  margin: 20px 0;
+  padding: 12px;
+  background: #3a3a3a;
+  color: #eee;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.load-more-btn:hover:not(:disabled) { background: #454545; }
+.load-more-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+#googleGrid.bg-light .load-more-btn {
+  background: #f0f0f0;
+  color: #333;
+  border-color: #ddd;
+}

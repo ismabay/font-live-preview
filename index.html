@@ -30,9 +30,11 @@
           <button id="filterActiveBtn" class="filter-dot filter-dot-active" title="Show only activated fonts"></button>
           <button id="filterInactiveBtn" class="filter-dot filter-dot-inactive" title="Show only inactive fonts"></button>
         </div>
+        <span id="ratingFilter" class="stars rating-filter" title="Show only fonts rated at least this many stars"></span>
         <div id="modeToggle">
           <button id="modeFolderBtn" class="mode-btn active" title="Fonts in the selected Eagle folder">Folder</button>
           <button id="modeSystemBtn" class="mode-btn" title="Fonts currently active on this computer">System</button>
+          <button id="modeGoogleBtn" class="mode-btn" title="Browse and download Google Fonts">Google</button>
         </div>
         <span id="itemCount">0 fonts</span>
         <button id="rescanBtn" title="Rescan">Refresh</button>
@@ -44,8 +46,15 @@
 
   <div id="mainView">
     <div id="status"></div>
+    <div id="nameSearchRow">
+      <input id="nameSearchInput" type="text" placeholder="Search fonts by name...">
+    </div>
+    <div id="googleSearchRow" class="hidden">
+      <input id="googleSearchInput" type="text" placeholder="Search Google Fonts by name...">
+    </div>
     <div id="grid" class="font-list-container"></div>
     <div id="systemGrid" class="font-list-container hidden"></div>
+    <div id="googleGrid" class="font-list-container hidden"></div>
   </div>
 
   <div id="detailView" class="hidden">
@@ -54,17 +63,22 @@
       <span id="detailFontName"></span>
       <span id="detailActivateBadge" class="activate-badge"></span>
       <span id="detailStars" class="stars"></span>
+      <label id="detailSizeLabel">Size
+        <input id="detailSizeSlider" type="range" min="50" max="220" value="100">
+      </label>
     </div>
     <div id="detailTabs">
       <button class="tab-btn active" data-tab="styles">Styles</button>
       <button class="tab-btn" data-tab="preview">Preview</button>
       <button class="tab-btn" data-tab="waterfall">Waterfall</button>
       <button class="tab-btn" data-tab="glyphs">Glyphs</button>
+      <button class="tab-btn" data-tab="details">Details</button>
     </div>
     <div id="tab-styles" class="tab-panel"></div>
     <div id="tab-preview" class="tab-panel hidden"></div>
     <div id="tab-waterfall" class="tab-panel hidden"></div>
     <div id="tab-glyphs" class="tab-panel hidden"></div>
+    <div id="tab-details" class="tab-panel hidden"></div>
   </div>
 
   <script src="js/vendor/opentype.min.js"></script>

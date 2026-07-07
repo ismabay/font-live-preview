@@ -6,6 +6,7 @@ const LIKE_RATING = 5;
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
+const https = require("https");
 const { execFile } = require("child_process");
 
 const PLATFORM = os.platform();
@@ -13,6 +14,7 @@ const IS_MAC = PLATFORM === "darwin";
 const IS_WIN = PLATFORM === "win32";
 
 const SYSTEM_RATINGS_FILE = path.join(os.homedir(), ".font-live-preview-system-ratings.json");
+const GOOGLE_CACHE_DIR = path.join(os.homedir(), ".font-live-preview-google-cache");
 
 const els = {
   input: document.getElementById("previewText"),
@@ -31,19 +33,28 @@ const els = {
   bgDarkBtn: document.getElementById("bgDarkBtn"),
   filterActiveBtn: document.getElementById("filterActiveBtn"),
   filterInactiveBtn: document.getElementById("filterInactiveBtn"),
+  ratingFilter: document.getElementById("ratingFilter"),
   modeFolderBtn: document.getElementById("modeFolderBtn"),
   modeSystemBtn: document.getElementById("modeSystemBtn"),
+  modeGoogleBtn: document.getElementById("modeGoogleBtn"),
+  googleSearchRow: document.getElementById("googleSearchRow"),
+  googleSearchInput: document.getElementById("googleSearchInput"),
+  googleGrid: document.getElementById("googleGrid"),
+  nameSearchRow: document.getElementById("nameSearchRow"),
+  nameSearchInput: document.getElementById("nameSearchInput"),
   mainView: document.getElementById("mainView"),
   detailView: document.getElementById("detailView"),
   backBtn: document.getElementById("backBtn"),
   detailFontName: document.getElementById("detailFontName"),
   detailStars: document.getElementById("detailStars"),
   detailActivateBadge: document.getElementById("detailActivateBadge"),
+  detailSizeSlider: document.getElementById("detailSizeSlider"),
   tabButtons: document.querySelectorAll(".tab-btn"),
   tabStyles: document.getElementById("tab-styles"),
   tabPreview: document.getElementById("tab-preview"),
   tabWaterfall: document.getElementById("tab-waterfall"),
   tabGlyphs: document.getElementById("tab-glyphs"),
+  tabDetails: document.getElementById("tab-details"),
 };
 
 const GLYPH_CHARS =
@@ -80,7 +91,13 @@ let systemFontEntries = []; // { file, dir, locked, filePath, family, ok }
 let viewMode = "list"; // "list" | "grid"
 let bgMode = "light"; // "light" | "dark"
 let activationFilter = "all"; // "all" | "active" | "inactive"
-let contentMode = "folder"; // "folder" | "system"
+let ratingFilter = 0; // 0 = no filter, else minimum star rating required
+let nameSearchQuery = "";
+let contentMode = "folder"; // "folder" | "system" | "google"
+let googleFontsMetadata = null; // null = not fetched yet
+let googleResultEntries = []; // currently rendered Google Fonts pool
+let googleSearchTimer = null;
+let googleRequestId = 0;
 
 // ================= View / background / filter toggles =================
 function setViewMode(mode) {
@@ -98,6 +115,8 @@ function setBgMode(mode) {
   document.querySelectorAll(".font-list-container").forEach((el) => {
     el.classList.toggle("bg-light", mode === "light");
   });
+  els.googleSearchRow.classList.toggle("bg-light", mode === "light");
+  els.nameSearchRow.classList.toggle("bg-light", mode === "light");
   els.bgLightBtn.classList.toggle("active", mode === "light");
   els.bgDarkBtn.classList.toggle("active", mode === "dark");
 }
@@ -109,14 +128,50 @@ function setActivationFilter(mode) {
   renderGrid();
 }
 
+function buildRatingFilterWidget() {
+  els.ratingFilter.innerHTML = "";
+  for (let i = 0; i < 5; i++) {
+    const star = document.createElement("span");
+    star.className = "star" + (i < ratingFilter ? " filled" : "");
+    star.textContent = "★";
+    star.title = `Show only fonts rated ${i + 1}+ stars`;
+    star.addEventListener("click", () => {
+      ratingFilter = ratingFilter === i + 1 ? 0 : i + 1;
+      buildRatingFilterWidget();
+      renderGrid();
+      renderSystemGrid();
+    });
+    els.ratingFilter.appendChild(star);
+  }
+}
+
 function setContentMode(mode) {
   contentMode = mode;
   els.modeFolderBtn.classList.toggle("active", mode === "folder");
   els.modeSystemBtn.classList.toggle("active", mode === "system");
+  els.modeGoogleBtn.classList.toggle("active", mode === "google");
   els.grid.classList.toggle("hidden", mode !== "folder");
   els.systemGrid.classList.toggle("hidden", mode !== "system");
-  if (mode === "system" && systemFontEntries.length === 0) {
-    scanSystemFonts();
+  els.googleGrid.classList.toggle("hidden", mode !== "google");
+  els.googleSearchRow.classList.toggle("hidden", mode !== "google");
+  els.nameSearchRow.classList.toggle("hidden", mode === "google");
+
+  if (mode === "system") {
+    if (systemFontEntries.length === 0) {
+      els.count.textContent = "Loading...";
+      scanSystemFonts();
+    } else {
+      els.count.textContent = systemFontEntries.length + " fonts";
+    }
+  } else if (mode === "google") {
+    if (googleFontsMetadata === null) {
+      els.count.textContent = "Loading...";
+      loadGoogleFontsList();
+    } else {
+      els.count.textContent = googleResultEntries.filter((r) => r.ok).length + " fonts";
+    }
+  } else {
+    els.count.textContent = loadedFonts.length ? loadedFonts.length + " fonts" : "0 fonts";
   }
 }
 
@@ -364,7 +419,7 @@ function makeSystemActivateDotBuilder({ locked, filePath, file, ext }) {
 }
 
 // ================= Shared font card builder =================
-function createFontCard({ displayName, family, ok, buildActivateDot, ratingGet, ratingSet, onOpenDetail }) {
+function createFontCard({ displayName, family, ok, buildActivateDot, ratingGet, ratingSet, onOpenDetail, familyCount }) {
   const card = document.createElement("div");
   card.className = "font-card" + (ok ? "" : " failed");
 
@@ -386,11 +441,48 @@ function createFontCard({ displayName, family, ok, buildActivateDot, ratingGet, 
   name.appendChild(stars);
   name.appendChild(nameText);
 
+  if (familyCount && familyCount > 1) {
+    const badge = document.createElement("span");
+    badge.className = "family-count-badge";
+    badge.textContent = familyCount + " styles";
+    badge.title = "Part of a family with " + familyCount + " styles — open it to see them all";
+    name.appendChild(badge);
+  }
+
   const preview = document.createElement("div");
   preview.className = "font-preview-text";
   preview.style.fontFamily = ok ? `"${family}"` : "inherit";
   preview.style.fontSize = els.size.value + "px";
   preview.textContent = ok ? els.input.value : "Failed to load";
+
+  if (ok) {
+    const stepper = document.createElement("span");
+    stepper.className = "size-stepper";
+    const minus = document.createElement("button");
+    minus.type = "button";
+    minus.textContent = "–";
+    minus.title = "Shrink this font only";
+    const plus = document.createElement("button");
+    plus.type = "button";
+    plus.textContent = "+";
+    plus.title = "Enlarge this font only";
+    const adjust = (delta) => {
+      const current = parseFloat(preview.style.fontSize) || parseFloat(els.size.value);
+      const next = Math.min(220, Math.max(10, current + delta));
+      preview.style.fontSize = next + "px";
+    };
+    minus.addEventListener("click", (e) => {
+      e.stopPropagation();
+      adjust(-4);
+    });
+    plus.addEventListener("click", (e) => {
+      e.stopPropagation();
+      adjust(4);
+    });
+    stepper.appendChild(minus);
+    stepper.appendChild(plus);
+    name.appendChild(stepper);
+  }
 
   card.appendChild(name);
   card.appendChild(preview);
@@ -404,9 +496,29 @@ function createFontCard({ displayName, family, ok, buildActivateDot, ratingGet, 
 function renderGrid() {
   els.grid.innerHTML = "";
   let renderedCount = 0;
+
+  const pool = loadedFonts
+    .filter((f) => f.ok)
+    .map(({ item, family }) => ({
+      displayName: item.name + (item.ext ? "." + item.ext : ""),
+      filePath: item.filePath,
+      cssFamily: family,
+      buildActivateDot: (el) => buildActivateBadge(item, el),
+      ratingGet: () => item.star || 0,
+      ratingSet: async (v) => {
+        item.star = v;
+        await item.save();
+      },
+    }));
+
+  const familyCountOf = buildFamilyCountLookup(pool.map((p) => p.filePath));
+  const query = nameSearchQuery.trim().toLowerCase();
+
   loadedFonts.forEach(({ item, family, ok }) => {
     if (activationFilter === "active" && !isActivated(item)) return;
     if (activationFilter === "inactive" && isActivated(item)) return;
+    if (ratingFilter > 0 && (item.star || 0) < ratingFilter) return;
+    if (query && !item.name.toLowerCase().includes(query)) return;
     renderedCount++;
 
     const displayName = item.name + (item.ext ? "." + item.ext : "");
@@ -414,6 +526,7 @@ function renderGrid() {
       displayName,
       family,
       ok,
+      familyCount: ok ? familyCountOf(item.filePath) : 1,
       buildActivateDot: (el) => buildActivateBadge(item, el),
       ratingGet: () => item.star || 0,
       ratingSet: async (v) => {
@@ -431,6 +544,7 @@ function renderGrid() {
             item.star = v;
             await item.save();
           },
+          pool,
         }),
     });
     els.grid.appendChild(card);
@@ -519,7 +633,29 @@ async function scanSystemFonts() {
 
 function renderSystemGrid() {
   els.systemGrid.innerHTML = "";
+  let renderedCount = 0;
+
+  const pool = systemFontEntries
+    .filter((e) => e.ok)
+    .map(({ file, filePath, family, locked }) => {
+      const ext = path.extname(file).slice(1).toLowerCase();
+      return {
+        displayName: file,
+        filePath,
+        cssFamily: family,
+        buildActivateDot: makeSystemActivateDotBuilder({ locked, filePath, file, ext }),
+        ratingGet: () => getSystemRating(filePath),
+        ratingSet: async (v) => setSystemRating(filePath, v),
+      };
+    });
+
+  const familyCountOf = buildFamilyCountLookup(pool.map((p) => p.filePath));
+  const query = nameSearchQuery.trim().toLowerCase();
+
   systemFontEntries.forEach(({ file, dir, locked, filePath, family, ok }) => {
+    if (ratingFilter > 0 && getSystemRating(filePath) < ratingFilter) return;
+    if (query && !file.toLowerCase().includes(query)) return;
+    renderedCount++;
     const ext = path.extname(file).slice(1).toLowerCase();
     const displayName = file;
     const dotBuilder = makeSystemActivateDotBuilder({ locked, filePath, file, ext });
@@ -528,6 +664,7 @@ function renderSystemGrid() {
       displayName,
       family,
       ok,
+      familyCount: ok ? familyCountOf(filePath) : 1,
       buildActivateDot: dotBuilder,
       ratingGet: () => getSystemRating(filePath),
       ratingSet: async (v) => setSystemRating(filePath, v),
@@ -539,18 +676,260 @@ function renderSystemGrid() {
           buildActivateDot: dotBuilder,
           ratingGet: () => getSystemRating(filePath),
           ratingSet: async (v) => setSystemRating(filePath, v),
+          pool,
         }),
     });
     els.systemGrid.appendChild(card);
   });
-  if (contentMode === "system") els.count.textContent = systemFontEntries.length + " fonts";
+  if (contentMode === "system") els.count.textContent = renderedCount + " fonts";
+}
+
+// ================= Google Fonts mode =================
+async function mapWithConcurrencyLimit(items, limit, mapper) {
+  const results = new Array(items.length);
+  let index = 0;
+  async function worker() {
+    while (index < items.length) {
+      const i = index++;
+      results[i] = await mapper(items[i], i);
+    }
+  }
+  const workerCount = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results;
+}
+
+function httpsGet(url, headers) {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, { headers: headers || {} }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          resolve(httpsGet(res.headers.location, headers));
+          return;
+        }
+        if (res.statusCode >= 400) {
+          reject(new Error(`Request failed: ${res.statusCode} for ${url}`));
+          return;
+        }
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => resolve(Buffer.concat(chunks)));
+        res.on("error", reject);
+      })
+      .on("error", reject);
+  });
+}
+
+async function loadGoogleFontsList() {
+  els.googleGrid.textContent = "Loading Google Fonts list...";
+  try {
+    const buffer = await httpsGet("https://fonts.google.com/metadata/fonts");
+    let text = buffer.toString("utf8");
+    if (text.startsWith(")]}'")) text = text.slice(text.indexOf("\n") + 1);
+    const json = JSON.parse(text);
+    googleFontsMetadata = json.familyMetadataList || [];
+    renderGoogleGrid();
+  } catch (err) {
+    console.error("Could not load Google Fonts list:", err);
+    googleFontsMetadata = [];
+    els.googleGrid.textContent = "Could not reach Google Fonts. Check your internet connection and try again.";
+  }
+}
+
+// Uses the legacy (non-css2) endpoint with an old-browser User-Agent, which makes
+// Google serve a plain .ttf link instead of .woff2 — needed for OS font activation.
+async function fetchGoogleFontFileUrl(familyName) {
+  const url = `https://fonts.googleapis.com/css?family=${encodeURIComponent(familyName)}`;
+  const buffer = await httpsGet(url, {
+    "User-Agent": "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/534.34 (KHTML, like Gecko) PhantomJS/1.9.7 Safari/534.34",
+  });
+  const css = buffer.toString("utf8");
+  const match = css.match(/url\((https:[^)]+\.ttf)\)/i) || css.match(/url\((https:[^)]+)\)/i);
+  return match ? match[1] : null;
+}
+
+async function downloadGoogleFont(familyName) {
+  fs.mkdirSync(GOOGLE_CACHE_DIR, { recursive: true });
+  const safeName = familyName.replace(/[^a-z0-9]/gi, "_");
+  const destPath = path.join(GOOGLE_CACHE_DIR, `${safeName}.ttf`);
+  if (fs.existsSync(destPath)) return destPath;
+
+  const fileUrl = await fetchGoogleFontFileUrl(familyName);
+  if (!fileUrl) throw new Error("Could not find a downloadable file for " + familyName);
+  const fileBuffer = await httpsGet(fileUrl);
+  fs.writeFileSync(destPath, fileBuffer);
+  return destPath;
+}
+
+async function loadGoogleFontFace(filePath, index) {
+  const family = `google-font-${index}`;
+  try {
+    const face = new FontFace(family, `url("file://${filePath}")`);
+    await face.load();
+    document.fonts.add(face);
+    return family;
+  } catch (err) {
+    console.error("Failed to load downloaded Google font:", filePath, err);
+    return null;
+  }
+}
+
+const GOOGLE_PAGE_SIZE = 100;
+let googleMatches = []; // full match list for the current query (unsliced)
+let googleLoadedCount = 0; // how many of googleMatches have been downloaded so far
+let googleLoadingMore = false;
+
+async function renderGoogleGrid() {
+  const myRequestId = ++googleRequestId;
+  const query = els.googleSearchInput.value.trim().toLowerCase();
+
+  if (!googleFontsMetadata) return;
+
+  googleMatches = query
+    ? googleFontsMetadata.filter((f) => f.family.toLowerCase().includes(query))
+    : googleFontsMetadata.slice();
+  googleLoadedCount = 0;
+  googleResultEntries = [];
+
+  if (googleMatches.length === 0) {
+    if (myRequestId !== googleRequestId) return;
+    els.googleGrid.innerHTML = "";
+    els.googleGrid.textContent = "No fonts found for \"" + query + "\".";
+    return;
+  }
+
+  els.googleGrid.innerHTML = "";
+  els.googleGrid.textContent = `Downloading fonts from Google...`;
+
+  await loadMoreGoogleFonts(myRequestId);
+}
+
+async function loadMoreGoogleFonts(requestId) {
+  const myRequestId = requestId !== undefined ? requestId : googleRequestId;
+  const nextBatch = googleMatches.slice(googleLoadedCount, googleLoadedCount + GOOGLE_PAGE_SIZE);
+  if (nextBatch.length === 0) return;
+
+  googleLoadingMore = true;
+  renderGoogleGridCards(); // shows a disabled "Loading more..." button while this batch downloads
+
+  const startIndex = googleLoadedCount;
+  const results = await mapWithConcurrencyLimit(nextBatch, 5, async (meta, i) => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const filePath = await downloadGoogleFont(meta.family);
+        const family = await loadGoogleFontFace(filePath, startIndex + i);
+        if (family) return { name: meta.family, filePath, family, ok: true };
+      } catch (err) {
+        if (attempt === 1) console.error("Could not load Google font:", meta.family, err);
+        else await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+    return { name: meta.family, filePath: null, family: null, ok: false };
+  });
+
+  // A newer search started while this batch was still downloading — discard it
+  // so an older, slower request can't overwrite the latest search.
+  if (myRequestId !== googleRequestId) return;
+
+  googleResultEntries = googleResultEntries.concat(results);
+  googleLoadedCount += nextBatch.length;
+  googleLoadingMore = false;
+  renderGoogleGridCards();
+}
+
+function renderGoogleGridCards() {
+  els.googleGrid.innerHTML = "";
+
+  const pool = googleResultEntries
+    .filter((r) => r.ok)
+    .map(({ name, filePath, family }) => ({
+      displayName: name + ".ttf",
+      filePath,
+      cssFamily: family,
+      buildActivateDot: (el) => buildActivateBadge({ filePath, name, ext: "ttf" }, el),
+      ratingGet: () => getSystemRating(filePath),
+      ratingSet: async (v) => setSystemRating(filePath, v),
+    }));
+
+  googleResultEntries.forEach(({ name, filePath, family, ok }) => {
+    const displayName = name + (ok ? ".ttf" : "");
+    const card = createFontCard({
+      displayName: ok ? displayName : `${name} (failed to load)`,
+      family,
+      ok,
+      buildActivateDot: (el) => {
+        if (!ok) {
+          el.classList.add("hidden");
+          return;
+        }
+        buildActivateBadge({ filePath, name, ext: "ttf" }, el);
+      },
+      ratingGet: () => (ok ? getSystemRating(filePath) : 0),
+      ratingSet: async (v) => {
+        if (ok) setSystemRating(filePath, v);
+      },
+      onOpenDetail: ok
+        ? () =>
+            openDetail({
+              displayName,
+              family,
+              filePath,
+              buildActivateDot: (el) => buildActivateBadge({ filePath, name, ext: "ttf" }, el),
+              ratingGet: () => getSystemRating(filePath),
+              ratingSet: async (v) => setSystemRating(filePath, v),
+              pool,
+            })
+        : null,
+    });
+    els.googleGrid.appendChild(card);
+  });
+
+  const remaining = googleMatches.length - googleLoadedCount;
+  if (remaining > 0) {
+    const loadMoreBtn = document.createElement("button");
+    loadMoreBtn.className = "load-more-btn";
+    if (googleLoadingMore) {
+      loadMoreBtn.textContent = "Loading more...";
+      loadMoreBtn.disabled = true;
+    } else {
+      loadMoreBtn.textContent = `Load ${Math.min(GOOGLE_PAGE_SIZE, remaining)} more (${remaining} remaining)`;
+      loadMoreBtn.addEventListener("click", () => loadMoreGoogleFonts());
+    }
+    els.googleGrid.appendChild(loadMoreBtn);
+  }
+
+  if (contentMode === "google") {
+    els.count.textContent = googleResultEntries.filter((r) => r.ok).length + " of " + googleMatches.length + " fonts";
+  }
 }
 
 // ================= Detail view (shared by folder + system fonts) =================
 let activeTab = "styles";
 let savedScrollY = 0;
+let detailScale = 1;
 
-function openDetail({ displayName, family, filePath, buildActivateDot, ratingGet, ratingSet }) {
+function taggedSize(el, baseSize) {
+  el.dataset.baseSize = baseSize;
+  el.style.fontSize = baseSize * detailScale + "px";
+}
+
+function applyDetailScale(scale) {
+  detailScale = scale;
+  document.querySelectorAll("#detailView [data-base-size]").forEach((el) => {
+    const base = parseFloat(el.dataset.baseSize);
+    el.style.fontSize = base * scale + "px";
+  });
+}
+
+function openExternal(url) {
+  try {
+    require("electron").shell.openExternal(url);
+  } catch (err) {
+    window.open(url, "_blank");
+  }
+}
+
+function openDetail({ displayName, family, filePath, buildActivateDot, ratingGet, ratingSet, pool }) {
   savedScrollY = window.scrollY;
   els.topbar.classList.add("hidden");
   els.mainView.classList.add("hidden");
@@ -561,10 +940,25 @@ function openDetail({ displayName, family, filePath, buildActivateDot, ratingGet
   buildActivateDot(els.detailActivateBadge);
   buildStars(ratingGet, ratingSet, els.detailStars);
 
-  renderStylesTab(family);
+  detailScale = 1;
+  els.detailSizeSlider.value = 100;
+  stylesTabText = null;
+
+  let parsedFont = null;
+  try {
+    const buffer = fs.readFileSync(filePath);
+    parsedFont = opentype.parse(toArrayBuffer(buffer));
+  } catch (err) {
+    console.error("Could not parse font for glyphs/details:", err);
+  }
+
+  const currentEntry = { displayName, filePath, cssFamily: family, buildActivateDot, ratingGet, ratingSet };
+
+  renderStylesTab(pool || [currentEntry], currentEntry, parsedFont);
   renderPreviewTab(family);
   renderWaterfallTab(family);
-  renderGlyphsTab(family, filePath);
+  renderGlyphsTab(family, parsedFont);
+  renderDetailsTab(parsedFont);
 
   setActiveTab(activeTab);
 }
@@ -583,6 +977,7 @@ function setActiveTab(tab) {
   els.tabPreview.classList.toggle("hidden", tab !== "preview");
   els.tabWaterfall.classList.toggle("hidden", tab !== "waterfall");
   els.tabGlyphs.classList.toggle("hidden", tab !== "glyphs");
+  els.tabDetails.classList.toggle("hidden", tab !== "details");
 }
 
 function renderPreviewTab(family) {
@@ -592,24 +987,29 @@ function renderPreviewTab(family) {
   const h1 = document.createElement("div");
   h1.className = "preview-h1";
   h1.style.fontFamily = ff;
+  taggedSize(h1, 46);
   h1.textContent = PREVIEW_CONTENT.h1;
 
   const h2 = document.createElement("div");
   h2.className = "preview-h2";
   h2.style.fontFamily = ff;
+  taggedSize(h2, 26);
   h2.textContent = PREVIEW_CONTENT.h2;
 
   const body = document.createElement("div");
   body.className = "preview-body";
   body.style.fontFamily = ff;
+  taggedSize(body, 17);
   body.textContent = PREVIEW_CONTENT.body;
 
   const columns = document.createElement("div");
   columns.className = "preview-columns";
   columns.style.fontFamily = ff;
   const p1 = document.createElement("p");
+  taggedSize(p1, 14);
   p1.textContent = PREVIEW_CONTENT.col1;
   const p2 = document.createElement("p");
+  taggedSize(p2, 14);
   p2.textContent = PREVIEW_CONTENT.col2;
   columns.appendChild(p1);
   columns.appendChild(p2);
@@ -620,14 +1020,89 @@ function renderPreviewTab(family) {
   els.tabPreview.appendChild(columns);
 }
 
-function renderStylesTab(family) {
-  const text = els.input.value.trim() || DEFAULT_PANGRAM;
+let stylesTabText = null;
+
+function renderStylesTab(pool, current, parsedFont) {
   els.tabStyles.innerHTML = "";
-  const p = document.createElement("div");
-  p.className = "styles-preview";
-  p.style.fontFamily = `"${family}"`;
-  p.textContent = text;
-  els.tabStyles.appendChild(p);
+
+  const inputRow = document.createElement("div");
+  inputRow.className = "styles-tab-input-row";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Type your text here...";
+  input.value = stylesTabText !== null ? stylesTabText : els.input.value.trim() || DEFAULT_PANGRAM;
+  input.addEventListener("input", () => {
+    stylesTabText = input.value;
+    const text = input.value || " ";
+    els.tabStyles.querySelectorAll(".styles-row-preview").forEach((el) => {
+      el.textContent = text;
+    });
+  });
+  inputRow.appendChild(input);
+  els.tabStyles.appendChild(inputRow);
+
+  const currentFamily = getFontNameField(parsedFont, "fontFamily") || getRealFamilyName(current.filePath);
+
+  let siblings = [current];
+  if (currentFamily && Array.isArray(pool) && pool.length) {
+    const matched = pool.filter((p) => getRealFamilyName(p.filePath) === currentFamily);
+    if (matched.length > 0) siblings = matched;
+  }
+
+  const list = document.createElement("div");
+  list.className = "styles-family-list";
+
+  siblings.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "styles-family-row";
+
+    const header = document.createElement("div");
+    header.className = "font-name";
+
+    const dot = document.createElement("span");
+    dot.className = "activate-badge";
+    entry.buildActivateDot(dot);
+
+    const stars = document.createElement("span");
+    stars.className = "stars";
+    buildStars(entry.ratingGet, entry.ratingSet, stars);
+
+    const label = document.createElement("span");
+    label.textContent = entry.displayName;
+
+    header.appendChild(dot);
+    header.appendChild(stars);
+    header.appendChild(label);
+
+    const preview = document.createElement("div");
+    preview.className = "styles-row-preview";
+    preview.style.fontFamily = `"${entry.cssFamily}"`;
+    taggedSize(preview, 40);
+    preview.textContent = input.value || DEFAULT_PANGRAM;
+
+    row.appendChild(header);
+    row.appendChild(preview);
+
+    if (entry.filePath !== current.filePath) {
+      row.classList.add("clickable-sibling");
+      row.addEventListener("click", (e) => {
+        if (e.target.closest(".activate-badge") || e.target.closest(".star")) return;
+        openDetail({
+          displayName: entry.displayName,
+          family: entry.cssFamily,
+          filePath: entry.filePath,
+          buildActivateDot: entry.buildActivateDot,
+          ratingGet: entry.ratingGet,
+          ratingSet: entry.ratingSet,
+          pool,
+        });
+      });
+    }
+
+    list.appendChild(row);
+  });
+
+  els.tabStyles.appendChild(list);
 }
 
 function renderWaterfallTab(family) {
@@ -642,7 +1117,7 @@ function renderWaterfallTab(family) {
     const txt = document.createElement("span");
     txt.className = "wf-text";
     txt.style.fontFamily = `"${family}"`;
-    txt.style.fontSize = size + "px";
+    taggedSize(txt, size);
     txt.textContent = text;
     row.appendChild(label);
     row.appendChild(txt);
@@ -654,40 +1129,139 @@ function toArrayBuffer(buffer) {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
-async function renderGlyphsTab(family, filePath) {
-  els.tabGlyphs.innerHTML = "";
-  els.tabGlyphs.textContent = "Loading glyphs...";
+// Real font-family name (from the font's own name table), cached per file path
+// so re-opening the Styles tab doesn't re-parse every sibling file each time.
+const familyNameCache = new Map();
 
-  let chars = null;
+function getRealFamilyName(filePath) {
+  if (familyNameCache.has(filePath)) return familyNameCache.get(filePath);
+  let family = null;
   try {
     const buffer = fs.readFileSync(filePath);
     const font = opentype.parse(toArrayBuffer(buffer));
+    family = getFontNameField(font, "fontFamily") || null;
+  } catch (err) {
+    family = null;
+  }
+  familyNameCache.set(filePath, family);
+  return family;
+}
+
+// Builds a lookup function returning how many fonts in the given list share the
+// same real font-family name — used to show a "N styles" badge in the list.
+function buildFamilyCountLookup(filePaths) {
+  const counts = {};
+  const familyOf = {};
+  filePaths.forEach((fp) => {
+    const fam = getRealFamilyName(fp) || fp;
+    familyOf[fp] = fam;
+    counts[fam] = (counts[fam] || 0) + 1;
+  });
+  return (fp) => counts[familyOf[fp]] || 1;
+}
+
+function renderGlyphsTab(family, parsedFont) {
+  els.tabGlyphs.innerHTML = "";
+
+  let chars = null;
+  if (parsedFont) {
     chars = GLYPH_CANDIDATES.filter((ch) => {
       try {
-        const glyph = font.charToGlyph(ch);
+        const glyph = parsedFont.charToGlyph(ch);
         return !!glyph && glyph.index !== 0;
       } catch (err) {
         return false;
       }
     });
-  } catch (err) {
-    console.error("Could not read glyph table, falling back to basic set:", err);
-    chars = null;
   }
-
   if (!chars || chars.length === 0) chars = GLYPH_CHARS;
 
-  els.tabGlyphs.innerHTML = "";
   const grid = document.createElement("div");
   grid.className = "glyph-grid";
   chars.forEach((ch) => {
     const cell = document.createElement("div");
     cell.className = "glyph-cell";
     cell.style.fontFamily = `"${family}"`;
+    taggedSize(cell, 22);
     cell.textContent = ch;
     grid.appendChild(cell);
   });
   els.tabGlyphs.appendChild(grid);
+}
+
+function getFontNameField(parsedFont, field) {
+  if (!parsedFont || !parsedFont.names) return "";
+  // opentype.js nests name-table entries under a platform key (e.g. "windows",
+  // "macintosh") rather than exposing them flatly, so check each platform in turn.
+  const platforms = Object.keys(parsedFont.names);
+  for (const platform of platforms) {
+    const nameObj = parsedFont.names[platform] && parsedFont.names[platform][field];
+    if (nameObj) {
+      return nameObj.en || Object.values(nameObj)[0] || "";
+    }
+  }
+  return "";
+}
+
+function renderDetailsTab(parsedFont) {
+  els.tabDetails.innerHTML = "";
+
+  const fields = [
+    ["Font Family", "fontFamily"],
+    ["Font Subfamily", "fontSubfamily"],
+    ["Full Name", "fullName"],
+    ["Version", "version"],
+    ["Designer", "designer"],
+    ["Designer URL", "designerURL"],
+    ["Manufacturer", "manufacturer"],
+    ["Manufacturer URL", "manufacturerURL"],
+    ["License", "license"],
+    ["License URL", "licenseURL"],
+    ["Copyright", "copyright"],
+    ["Trademark", "trademark"],
+  ];
+
+  const table = document.createElement("table");
+  table.className = "details-table";
+  let anyRow = false;
+
+  fields.forEach(([label, key]) => {
+    const value = getFontNameField(parsedFont, key);
+    if (!value) return;
+    anyRow = true;
+
+    const tr = document.createElement("tr");
+    const tdLabel = document.createElement("td");
+    tdLabel.textContent = label;
+
+    const tdValue = document.createElement("td");
+    if (/^https?:\/\//i.test(value)) {
+      const link = document.createElement("a");
+      link.href = "#";
+      link.textContent = value;
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        openExternal(value);
+      });
+      tdValue.appendChild(link);
+    } else {
+      tdValue.textContent = value;
+    }
+
+    tr.appendChild(tdLabel);
+    tr.appendChild(tdValue);
+    table.appendChild(tr);
+  });
+
+  if (!anyRow) {
+    const empty = document.createElement("div");
+    empty.className = "details-empty";
+    empty.textContent = "No metadata available for this font.";
+    els.tabDetails.appendChild(empty);
+    return;
+  }
+
+  els.tabDetails.appendChild(table);
 }
 
 els.backBtn.addEventListener("click", closeDetail);
@@ -820,7 +1394,8 @@ els.input.addEventListener("input", applyText);
 els.size.addEventListener("input", applySize);
 els.rescan.addEventListener("click", () => {
   if (contentMode === "folder") scanAndLoad();
-  else scanSystemFonts();
+  else if (contentMode === "system") scanSystemFonts();
+  else renderGoogleGrid();
 });
 els.includeSubfolders.addEventListener("change", scanAndLoad);
 els.viewGridBtn.addEventListener("click", () => setViewMode("grid"));
@@ -831,12 +1406,26 @@ els.filterActiveBtn.addEventListener("click", () => setActivationFilter("active"
 els.filterInactiveBtn.addEventListener("click", () => setActivationFilter("inactive"));
 els.modeFolderBtn.addEventListener("click", () => setContentMode("folder"));
 els.modeSystemBtn.addEventListener("click", () => setContentMode("system"));
+els.modeGoogleBtn.addEventListener("click", () => setContentMode("google"));
+els.googleSearchInput.addEventListener("input", () => {
+  clearTimeout(googleSearchTimer);
+  googleSearchTimer = setTimeout(renderGoogleGrid, 400);
+});
+els.nameSearchInput.addEventListener("input", () => {
+  nameSearchQuery = els.nameSearchInput.value;
+  if (contentMode === "folder") renderGrid();
+  else if (contentMode === "system") renderSystemGrid();
+});
+els.detailSizeSlider.addEventListener("input", () => {
+  applyDetailScale(els.detailSizeSlider.value / 100);
+});
 els.controlsToggleBtn.addEventListener("click", () => {
   const expanded = els.topbar.classList.toggle("expanded");
   els.controlsToggleBtn.textContent = expanded ? "◂" : "▸";
   els.mainView.classList.toggle("controls-expanded", expanded);
 });
 
+buildRatingFilterWidget();
 setViewMode(viewMode);
 setBgMode(bgMode);
 setContentMode(contentMode);
