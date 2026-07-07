@@ -1,0 +1,15 @@
+{
+    "id": "3458ad58-b61f-4248-ac12-db15a9860c88",
+    "version": "1.0.0",
+    "platform": "all",
+    "arch": "all",
+    "name": "Font Live Preview",
+    "logo": "/logo.png",
+    "keywords": [],
+    "devTools": false,
+    "main": {
+        "url": "index.html",
+        "width": 1280,
+        "height": 960
+    }
+}

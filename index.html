@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Font Live Preview</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="topbar">
+    <input id="previewText" type="text" placeholder="Type your text here..." value="ABCDEabcde 0123456" autofocus>
+
+    <div id="controlsScroll">
+      <div id="controls">
+        <label>Size
+          <input id="sizeSlider" type="range" min="16" max="144" value="34">
+        </label>
+        <label id="subfoldersLabel">
+          <input id="includeSubfolders" type="checkbox">
+          Include subfolders
+        </label>
+        <div id="viewToggle">
+          <button id="viewGridBtn" class="view-btn" title="Grid view">▦</button>
+          <button id="viewListBtn" class="view-btn active" title="List view">☰</button>
+        </div>
+        <div id="bgToggle">
+          <button id="bgLightBtn" class="bg-btn active" title="Light background">☀</button>
+          <button id="bgDarkBtn" class="bg-btn" title="Dark background">☾</button>
+        </div>
+        <div id="activationFilter">
+          <button id="filterActiveBtn" class="filter-dot filter-dot-active" title="Show only activated fonts"></button>
+          <button id="filterInactiveBtn" class="filter-dot filter-dot-inactive" title="Show only inactive fonts"></button>
+        </div>
+        <div id="modeToggle">
+          <button id="modeFolderBtn" class="mode-btn active" title="Fonts in the selected Eagle folder">Folder</button>
+          <button id="modeSystemBtn" class="mode-btn" title="Fonts currently active on this computer">System</button>
+        </div>
+        <span id="itemCount">0 fonts</span>
+        <button id="rescanBtn" title="Rescan">Refresh</button>
+      </div>
+    </div>
+
+    <button id="controlsToggleBtn" title="More controls">▸</button>
+  </div>
+
+  <div id="mainView">
+    <div id="status"></div>
+    <div id="grid" class="font-list-container"></div>
+    <div id="systemGrid" class="font-list-container hidden"></div>
+  </div>
+
+  <div id="detailView" class="hidden">
+    <div id="detailTopbar">
+      <button id="backBtn" title="Back to list">←</button>
+      <span id="detailFontName"></span>
+      <span id="detailActivateBadge" class="activate-badge"></span>
+      <span id="detailStars" class="stars"></span>
+    </div>
+    <div id="detailTabs">
+      <button class="tab-btn active" data-tab="styles">Styles</button>
+      <button class="tab-btn" data-tab="preview">Preview</button>
+      <button class="tab-btn" data-tab="waterfall">Waterfall</button>
+      <button class="tab-btn" data-tab="glyphs">Glyphs</button>
+    </div>
+    <div id="tab-styles" class="tab-panel"></div>
+    <div id="tab-preview" class="tab-panel hidden"></div>
+    <div id="tab-waterfall" class="tab-panel hidden"></div>
+    <div id="tab-glyphs" class="tab-panel hidden"></div>
+  </div>
+
+  <script src="js/main.js"></script>
+</body>
+</html>
