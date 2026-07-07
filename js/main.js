@@ -48,6 +48,19 @@ const els = {
 
 const GLYPH_CHARS =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,:;!?'\"-()&@#%".split("");
+
+// Broad candidate pool checked against each font's real glyph table (via opentype.js).
+// Only the characters the font actually contains are shown; the rest are simply skipped.
+const GLYPH_CANDIDATES = (
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
+  "abcdefghijklmnopqrstuvwxyz" +
+  "0123456789" +
+  ".,:;!?'\"-()[]{}/\\@#$%^&*_+=<>|~`" +
+  "ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÑÒÓÔÕÖØÙÚÛÜÝ" +
+  "àáâãäåæçèéêëìíîïñòóôõöøùúûüýÿ" +
+  "€£¥¢§¶©®™°±×÷" +
+  "←→↑↓•…–—"
+).split("");
 const WATERFALL_SIZES = [64, 48, 36, 28, 22, 18, 15, 12];
 const DEFAULT_PANGRAM = "The quick brown fox jumps over the lazy dog";
 
@@ -411,6 +424,7 @@ function renderGrid() {
         openDetail({
           displayName,
           family,
+          filePath: item.filePath,
           buildActivateDot: (el) => buildActivateBadge(item, el),
           ratingGet: () => item.star || 0,
           ratingSet: async (v) => {
@@ -521,6 +535,7 @@ function renderSystemGrid() {
         openDetail({
           displayName,
           family,
+          filePath,
           buildActivateDot: dotBuilder,
           ratingGet: () => getSystemRating(filePath),
           ratingSet: async (v) => setSystemRating(filePath, v),
@@ -535,7 +550,7 @@ function renderSystemGrid() {
 let activeTab = "styles";
 let savedScrollY = 0;
 
-function openDetail({ displayName, family, buildActivateDot, ratingGet, ratingSet }) {
+function openDetail({ displayName, family, filePath, buildActivateDot, ratingGet, ratingSet }) {
   savedScrollY = window.scrollY;
   els.topbar.classList.add("hidden");
   els.mainView.classList.add("hidden");
@@ -549,7 +564,7 @@ function openDetail({ displayName, family, buildActivateDot, ratingGet, ratingSe
   renderStylesTab(family);
   renderPreviewTab(family);
   renderWaterfallTab(family);
-  renderGlyphsTab(family);
+  renderGlyphsTab(family, filePath);
 
   setActiveTab(activeTab);
 }
@@ -635,11 +650,37 @@ function renderWaterfallTab(family) {
   });
 }
 
-function renderGlyphsTab(family) {
+function toArrayBuffer(buffer) {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
+
+async function renderGlyphsTab(family, filePath) {
+  els.tabGlyphs.innerHTML = "";
+  els.tabGlyphs.textContent = "Loading glyphs...";
+
+  let chars = null;
+  try {
+    const buffer = fs.readFileSync(filePath);
+    const font = opentype.parse(toArrayBuffer(buffer));
+    chars = GLYPH_CANDIDATES.filter((ch) => {
+      try {
+        const glyph = font.charToGlyph(ch);
+        return !!glyph && glyph.index !== 0;
+      } catch (err) {
+        return false;
+      }
+    });
+  } catch (err) {
+    console.error("Could not read glyph table, falling back to basic set:", err);
+    chars = null;
+  }
+
+  if (!chars || chars.length === 0) chars = GLYPH_CHARS;
+
   els.tabGlyphs.innerHTML = "";
   const grid = document.createElement("div");
   grid.className = "glyph-grid";
-  GLYPH_CHARS.forEach((ch) => {
+  chars.forEach((ch) => {
     const cell = document.createElement("div");
     cell.className = "glyph-cell";
     cell.style.fontFamily = `"${family}"`;
