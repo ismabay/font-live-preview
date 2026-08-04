@@ -7,6 +7,7 @@ const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const crypto = require("crypto");
 const { execFile } = require("child_process");
 
 const PLATFORM = os.platform();
@@ -15,6 +16,8 @@ const IS_WIN = PLATFORM === "win32";
 
 const SYSTEM_RATINGS_FILE = path.join(os.homedir(), ".font-live-preview-system-ratings.json");
 const GOOGLE_CACHE_DIR = path.join(os.homedir(), ".font-live-preview-google-cache");
+const INSTALL_RECORDS_FILE = path.join(os.homedir(), ".font-live-preview-installs.json");
+const QUARANTINE_DIR = path.join(os.homedir(), ".font-live-preview-quarantine");
 
 const els = {
   input: document.getElementById("previewText"),
@@ -250,6 +253,66 @@ function setSystemRating(filePath, value) {
   saveSystemRatingsMap(map);
 }
 
+// ================= Installation records & safety helpers =================
+// We only ever consider a font "activated by this plugin" if we have a recorded,
+// hash-verified entry for it. This prevents us from silently overwriting or
+// deleting an unrelated font that happens to share the same file name.
+function loadInstallRecords() {
+  try {
+    return JSON.parse(fs.readFileSync(INSTALL_RECORDS_FILE, "utf8"));
+  } catch (err) {
+    return {};
+  }
+}
+function saveInstallRecords(records) {
+  try {
+    fs.writeFileSync(INSTALL_RECORDS_FILE, JSON.stringify(records, null, 2));
+  } catch (err) {
+    console.error("Could not save install records:", err);
+  }
+}
+function hashFile(filePath) {
+  try {
+    return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  } catch (err) {
+    return null;
+  }
+}
+function getInstallRecord(destPath) {
+  return loadInstallRecords()[destPath] || null;
+}
+function isOurInstall(destPath) {
+  const record = getInstallRecord(destPath);
+  if (!record) return false;
+  const currentHash = hashFile(destPath);
+  return currentHash !== null && currentHash === record.hash;
+}
+function recordInstall(destPath, { sourcePath, name, ext }) {
+  const records = loadInstallRecords();
+  records[destPath] = {
+    sourcePath,
+    destPath,
+    hash: hashFile(destPath),
+    name,
+    ext,
+    installedAt: Date.now(),
+  };
+  saveInstallRecords(records);
+}
+function forgetInstall(destPath) {
+  const records = loadInstallRecords();
+  delete records[destPath];
+  saveInstallRecords(records);
+}
+// Deactivating never permanently deletes a file — it moves it to a local
+// quarantine folder so it can be recovered if something goes wrong.
+function quarantineFile(filePath) {
+  fs.mkdirSync(QUARANTINE_DIR, { recursive: true });
+  const dest = path.join(QUARANTINE_DIR, `${Date.now()}-${path.basename(filePath)}`);
+  fs.renameSync(filePath, dest);
+  return dest;
+}
+
 // ================= Font activation (Mac + Windows) =================
 function macFontDest(item) {
   return path.join(os.homedir(), "Library", "Fonts", path.basename(item.filePath));
@@ -260,25 +323,37 @@ function winFontDest(item) {
   return path.join(localAppData, "Microsoft", "Windows", "Fonts", path.basename(item.filePath));
 }
 
+function activationDest(item) {
+  if (IS_MAC) return macFontDest(item);
+  if (IS_WIN) return winFontDest(item);
+  return null;
+}
+
 function isActivatable(item) {
   const ext = (item.ext || "").toLowerCase();
   return (IS_MAC || IS_WIN) && ACTIVATABLE_EXTS.includes(ext);
 }
 
+// "Activated" = a file exists at the destination at all (regardless of who put it
+// there). "Activated by us" = it exists AND matches our recorded install (verified
+// by hash), which is the only state we're willing to modify or remove.
 function isActivated(item) {
-  if (IS_MAC) return fs.existsSync(macFontDest(item));
-  if (IS_WIN) return fs.existsSync(winFontDest(item));
-  return false;
+  const dest = activationDest(item);
+  return !!dest && fs.existsSync(dest);
+}
+function isActivatedByUs(item) {
+  const dest = activationDest(item);
+  return !!dest && fs.existsSync(dest) && isOurInstall(dest);
 }
 
-function fontRegistryName(item) {
-  const suffix = (item.ext || "").toLowerCase() === "otf" ? "OpenType" : "TrueType";
-  return `${item.name} (${suffix})`;
+function fontRegistryName(name, ext) {
+  const suffix = (ext || "").toLowerCase() === "otf" ? "OpenType" : "TrueType";
+  return `${name} (${suffix})`;
 }
 
-function runWindowsFontScript(fontPath, item, install) {
+function runWindowsFontScript(fontPath, { name, ext }, install) {
   return new Promise((resolve, reject) => {
-    const regName = fontRegistryName(item).replace(/'/g, "''");
+    const regName = fontRegistryName(name, ext).replace(/'/g, "''");
     const safePath = fontPath.replace(/'/g, "''");
     const script = install
       ? `
@@ -324,97 +399,185 @@ public class EagleFontHelperRemove {
 }
 
 async function activateFont(item) {
-  if (IS_MAC) {
-    fs.copyFileSync(item.filePath, macFontDest(item));
-    return;
+  const dest = activationDest(item);
+  if (!dest) throw new Error("Font activation is not supported on this platform.");
+
+  if (fs.existsSync(dest)) {
+    if (isOurInstall(dest)) return; // already active via us, nothing to do
+    throw new Error(
+      "A different font file already exists at this location, so activating " +
+        "this one was cancelled to avoid overwriting it:\n\n" +
+        dest
+    );
   }
+
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  try {
+    // COPYFILE_EXCL refuses to overwrite an existing file, closing the race
+    // between the existsSync() check above and the actual copy.
+    fs.copyFileSync(item.filePath, dest, fs.constants.COPYFILE_EXCL);
+  } catch (err) {
+    if (err.code === "EEXIST") {
+      throw new Error(
+        "A different font file already exists at this location, so activating " +
+          "this one was cancelled to avoid overwriting it:\n\n" +
+          dest
+      );
+    }
+    throw err;
+  }
+
   if (IS_WIN) {
-    const dest = winFontDest(item);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.copyFileSync(item.filePath, dest);
-    await runWindowsFontScript(dest, item, true);
-    return;
+    await runWindowsFontScript(dest, { name: item.name, ext: item.ext }, true);
   }
-  throw new Error("Font activation is not supported on this platform.");
+
+  recordInstall(dest, { sourcePath: item.filePath, name: item.name, ext: item.ext });
 }
 
 async function deactivateFont(item) {
-  if (IS_MAC) {
-    const dest = macFontDest(item);
-    if (fs.existsSync(dest)) fs.unlinkSync(dest);
-    return;
+  const dest = activationDest(item);
+  if (!dest) throw new Error("Font activation is not supported on this platform.");
+
+  if (!fs.existsSync(dest)) return; // already gone
+
+  if (!isOurInstall(dest)) {
+    throw new Error(
+      "This font wasn't installed by Font Live Preview (no matching record), so " +
+        "it can't be safely removed from here — that would risk deleting an " +
+        "unrelated font:\n\n" +
+        dest
+    );
   }
+
+  const record = getInstallRecord(dest);
   if (IS_WIN) {
-    const dest = winFontDest(item);
-    await runWindowsFontScript(dest, item, false);
-    if (fs.existsSync(dest)) fs.unlinkSync(dest);
-    return;
+    await runWindowsFontScript(dest, { name: record.name, ext: record.ext }, false).catch(() => {});
   }
-  throw new Error("Font activation is not supported on this platform.");
+
+  quarantineFile(dest); // moved, not permanently deleted
+  forgetInstall(dest);
 }
 
-// Default activate-dot builder for Eagle-library fonts (folder mode)
+// Default activate-dot builder for Eagle-library fonts (folder mode).
+// Three states: inactive (gray) / activated by us (green) / a different font
+// already occupies that file name (amber "conflict", not manageable here).
 function buildActivateBadge(item, container) {
   if (!isActivatable(item)) {
     container.classList.add("hidden");
     return;
   }
-  container.classList.remove("hidden");
-  container.classList.remove("pending", "locked-dot");
+  container.classList.remove("hidden", "pending", "locked-dot", "foreign-dot");
+
+  const dest = activationDest(item);
+  const exists = !!dest && fs.existsSync(dest);
+  const oursActive = exists && isOurInstall(dest);
+  const foreignConflict = exists && !oursActive;
+
+  container.classList.toggle("active", exists);
+  container.classList.toggle("foreign-dot", foreignConflict);
+
+  if (foreignConflict) {
+    container.style.cursor = "default";
+    container.title = "A different font already exists at this location — can't manage it from here";
+    container.onclick = (e) => {
+      e.stopPropagation();
+      alert(
+        "A different font file already exists at:\n\n" +
+          dest +
+          "\n\nTo avoid overwriting or deleting it, Font Live Preview won't manage activation for this file name here."
+      );
+    };
+    return;
+  }
+
   container.style.cursor = "pointer";
-  const active = isActivated(item);
-  container.classList.toggle("active", active);
-  container.title = active ? "Activated — click to deactivate" : "Click to activate on this computer";
+  container.title = oursActive ? "Activated by this plugin — click to deactivate" : "Click to activate on this computer";
   container.onclick = async (e) => {
     e.stopPropagation();
+    if (oursActive) {
+      const ok = confirm(
+        "Deactivate this font?\n\nThe file will be moved to a local quarantine folder, not permanently deleted, so it can be recovered if needed."
+      );
+      if (!ok) return;
+    }
     container.classList.add("pending");
     try {
-      if (isActivated(item)) {
+      if (oursActive) {
         await deactivateFont(item);
       } else {
         await activateFont(item);
       }
     } catch (err) {
       console.error("Font activation failed:", err);
-      alert("Could not update font activation:\n" + err.message);
+      alert("Could not update font activation:\n\n" + err.message);
     } finally {
       buildActivateBadge(item, container);
     }
   };
 }
 
-// Activate-dot builder for System Fonts view: these are always "active" by definition
-// (they were found in a live font directory). Locked = OS/system dir, cannot be changed.
-// Editable = user font dir, clicking removes the file entirely.
+// Activate-dot builder for the System Fonts view. Every font shown here is
+// already active by definition (it was found in a live font directory), so the
+// dot's job is different from the folder-mode one above:
+//   - locked (OS-owned directory)            → gray, not clickable
+//   - active, but not installed by this plugin → amber, informational only
+//   - active AND verified as our own install   → green, click to deactivate
+//     (with an explicit confirmation, moved to quarantine rather than deleted)
 function makeSystemActivateDotBuilder({ locked, filePath, file, ext }) {
   return (el) => {
-    el.classList.remove("hidden", "pending");
+    el.classList.remove("hidden", "pending", "locked-dot", "foreign-dot");
     el.classList.add("active");
-    el.classList.toggle("locked-dot", locked);
+
     if (locked) {
+      el.classList.add("locked-dot");
       el.title = "System font — cannot be changed";
       el.style.cursor = "default";
       el.onclick = null;
-    } else {
-      el.title = "Click to deactivate (removes the font file)";
-      el.style.cursor = "pointer";
-      el.onclick = async (e) => {
-        e.stopPropagation();
-        el.classList.add("pending");
-        try {
-          fs.unlinkSync(filePath);
-          if (IS_WIN) {
-            const guessName = file.replace(/\.(ttf|otf)$/i, "");
-            await runWindowsFontScript(filePath, { name: guessName, ext }, false).catch(() => {});
-          }
-          if (!els.detailView.classList.contains("hidden")) closeDetail();
-          await scanSystemFonts();
-        } catch (err) {
-          alert("Could not remove font file:\n" + err.message);
-          el.classList.remove("pending");
-        }
-      };
+      return;
     }
+
+    if (!isOurInstall(filePath)) {
+      el.classList.add("foreign-dot");
+      el.title = "Active, but not installed by this plugin — can't be safely removed here";
+      el.style.cursor = "default";
+      el.onclick = (e) => {
+        e.stopPropagation();
+        alert(
+          "This font is currently active, but Font Live Preview has no installation record for it " +
+            "(it may have been installed manually or by another app), so it can't be safely removed from here:\n\n" +
+            filePath
+        );
+      };
+      return;
+    }
+
+    el.title = "Installed by this plugin — click to deactivate";
+    el.style.cursor = "pointer";
+    el.onclick = async (e) => {
+      e.stopPropagation();
+      const ok = confirm(
+        "Deactivate this font?\n\n" +
+          filePath +
+          "\n\nThe file will be moved to a local quarantine folder, not permanently deleted."
+      );
+      if (!ok) return;
+
+      el.classList.add("pending");
+      try {
+        const record = getInstallRecord(filePath);
+        if (IS_WIN && record) {
+          await runWindowsFontScript(filePath, { name: record.name, ext: record.ext }, false).catch(() => {});
+        }
+        quarantineFile(filePath);
+        forgetInstall(filePath);
+
+        if (!els.detailView.classList.contains("hidden")) closeDetail();
+        await scanSystemFonts();
+      } catch (err) {
+        alert("Could not deactivate font:\n\n" + err.message);
+        el.classList.remove("pending");
+      }
+    };
   };
 }
 
@@ -556,8 +719,11 @@ function renderGrid() {
 function getSystemFontDirs() {
   if (IS_MAC) {
     return {
-      locked: ["/System/Library/Fonts", "/System/Library/Fonts/Supplemental"],
-      editable: ["/Library/Fonts", path.join(os.homedir(), "Library", "Fonts")],
+      // /Library/Fonts is shared across all users and often admin-owned, so we
+      // treat it as protected/locked rather than something this plugin can
+      // remove files from — only the current user's own font folder is editable.
+      locked: ["/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts"],
+      editable: [path.join(os.homedir(), "Library", "Fonts")],
     };
   }
   if (IS_WIN) {

@@ -300,6 +300,11 @@ body {
   cursor: default;
 }
 .activate-badge.locked-dot:hover { transform: none; }
+.activate-badge.foreign-dot {
+  background: #d98c00;
+  border-color: #d98c00;
+}
+.activate-badge.foreign-dot:hover { transform: none; }
 .activate-badge.pending {
   opacity: 0.4;
   cursor: wait;
