@@ -7,6 +7,19 @@ const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+
+// Converts an OS file path to a file:// URL, handled manually rather than via
+// Node's url.pathToFileURL — that function's Windows-path handling only
+// activates when Node itself is actually running on Windows, which made it
+// impossible to verify here and, per an Eagle review report, produced broken
+// URLs (net::ERR_FILE_NOT_FOUND) for every font on a real Windows machine.
+function toFileURL(filePath) {
+  let normalized = filePath.replace(/\\/g, "/");
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    normalized = "/" + normalized; // C:/... -> /C:/... so "file://" + this = file:///C:/...
+  }
+  return "file://" + encodeURI(normalized);
+}
 const crypto = require("crypto");
 const { execFile } = require("child_process");
 
@@ -434,13 +447,19 @@ async function activateFont(item) {
   recordInstall(dest, { sourcePath: item.filePath, name: item.name, ext: item.ext });
 }
 
-async function deactivateFont(item) {
-  const dest = activationDest(item);
-  if (!dest) throw new Error("Font activation is not supported on this platform.");
+// Single shared deactivation path for BOTH the Folder-mode toggle and the
+// System Fonts view, so the safety check can never diverge between them.
+// Re-validates ownership (existence + hash match) at the last possible moment,
+// immediately before touching the filesystem — not just when the button was
+// first drawn — to close the gap between "user saw a green dot" and "user
+// clicked confirm" during which the file could have been replaced.
+async function safeDeactivate(dest) {
+  if (!fs.existsSync(dest)) {
+    throw new Error("This font is no longer at the expected location — nothing to deactivate.");
+  }
 
-  if (!fs.existsSync(dest)) return; // already gone
-
-  if (!isOurInstall(dest)) {
+  const record = getInstallRecord(dest);
+  if (!record) {
     throw new Error(
       "This font wasn't installed by Font Live Preview (no matching record), so " +
         "it can't be safely removed from here — that would risk deleting an " +
@@ -449,13 +468,28 @@ async function deactivateFont(item) {
     );
   }
 
-  const record = getInstallRecord(dest);
+  const currentHash = hashFile(dest);
+  if (currentHash === null || currentHash !== record.hash) {
+    throw new Error(
+      "This file has changed since it was activated (it no longer matches what " +
+        "this plugin installed), so deactivation was cancelled to avoid affecting " +
+        "a different file:\n\n" +
+        dest
+    );
+  }
+
   if (IS_WIN) {
     await runWindowsFontScript(dest, { name: record.name, ext: record.ext }, false).catch(() => {});
   }
 
   quarantineFile(dest); // moved, not permanently deleted
   forgetInstall(dest);
+}
+
+async function deactivateFont(item) {
+  const dest = activationDest(item);
+  if (!dest) throw new Error("Font activation is not supported on this platform.");
+  await safeDeactivate(dest);
 }
 
 // Default activate-dot builder for Eagle-library fonts (folder mode).
@@ -564,12 +598,7 @@ function makeSystemActivateDotBuilder({ locked, filePath, file, ext }) {
 
       el.classList.add("pending");
       try {
-        const record = getInstallRecord(filePath);
-        if (IS_WIN && record) {
-          await runWindowsFontScript(filePath, { name: record.name, ext: record.ext }, false).catch(() => {});
-        }
-        quarantineFile(filePath);
-        forgetInstall(filePath);
+        await safeDeactivate(filePath);
 
         if (!els.detailView.classList.contains("hidden")) closeDetail();
         await scanSystemFonts();
@@ -750,7 +779,7 @@ function scanDirForFonts(dir) {
 async function loadSystemFontFace(fullPath, index) {
   const family = `sys-font-${index}`;
   try {
-    const face = new FontFace(family, `url("file://${fullPath}")`);
+    const face = new FontFace(family, `url("${toFileURL(fullPath)}")`);
     await face.load();
     document.fonts.add(face);
     return family;
@@ -930,7 +959,7 @@ async function downloadGoogleFont(familyName) {
 async function loadGoogleFontFace(filePath, index) {
   const family = `google-font-${index}`;
   try {
-    const face = new FontFace(family, `url("file://${filePath}")`);
+    const face = new FontFace(family, `url("${toFileURL(filePath)}")`);
     await face.load();
     document.fonts.add(face);
     return family;
@@ -1439,7 +1468,7 @@ els.tabButtons.forEach((btn) => {
 async function loadFontFace(item, index) {
   const family = `live-preview-${index}-${item.id}`;
   try {
-    const src = item.fileURL || `file://${item.filePath}`;
+    const src = item.fileURL || toFileURL(item.filePath);
     const face = new FontFace(family, `url("${src}")`);
     await face.load();
     document.fonts.add(face);
